@@ -40,10 +40,12 @@ jobs:
           wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
           tar xzf zlib-${ZLIB_VER}.tar.gz
           cd zlib-${ZLIB_VER}
-          CC=aarch64-buildroot-linux-musl-gcc \
-            CFLAGS="-static" \
-            ./configure --prefix=${{ env.SYSROOT }} --static
-          make -j$(nproc)
+          ./configure --prefix=${{ env.SYSROOT }} --static
+          make -j$(nproc) \
+            CC=aarch64-buildroot-linux-musl-gcc \
+            AR=aarch64-buildroot-linux-musl-ar \
+            RANLIB=aarch64-buildroot-linux-musl-ranlib \
+            CFLAGS="-static"
           make install
 
       - name: Cross-compile openssl (aarch64)
@@ -121,10 +123,12 @@ jobs:
           wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
           tar xzf zlib-${ZLIB_VER}.tar.gz
           cd zlib-${ZLIB_VER}
-          CC=i686-buildroot-linux-musl-gcc \
-            CFLAGS="-static -m32" \
-            ./configure --prefix=${{ env.SYSROOT }} --static
-          make -j$(nproc)
+          ./configure --prefix=${{ env.SYSROOT }} --static
+          make -j$(nproc) \
+            CC=i686-buildroot-linux-musl-gcc \
+            AR=i686-buildroot-linux-musl-ar \
+            RANLIB=i686-buildroot-linux-musl-ranlib \
+            CFLAGS="-static -m32"
           make install
 
       - name: Cross-compile openssl (i686)
