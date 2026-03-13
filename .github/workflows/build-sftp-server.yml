@@ -10,9 +10,15 @@ on:
 
 # Toolchain source: toolchains.bootlin.com (stable, musl)
 # musl.cc is unreliable from GitHub Actions (wget exit code 4)
+#
+# bootlin toolchains are bare cross-compilers — they do NOT ship zlib or
+# openssl for the target. We cross-compile both from source into a local
+# sysroot and point openssh configure at it via CFLAGS/LDFLAGS.
 env:
   BOOTLIN_BASE: https://toolchains.bootlin.com/downloads/releases/toolchains
   BOOTLIN_VER: 2024.05-1
+  ZLIB_VER: 1.3.1
+  OPENSSL_VER: 3.5.0
 
 jobs:
   # ── arm64 static (for Termux proot-distro Debian) ──────────────────────────
@@ -27,6 +33,30 @@ jobs:
           TCDIR=$(ls -d $HOME/aarch64--musl--stable-* | head -1)
           echo "${TCDIR}/bin" >> $GITHUB_PATH
           echo "CROSS_PREFIX=aarch64-buildroot-linux-musl" >> $GITHUB_ENV
+          echo "SYSROOT=$HOME/sysroot-aarch64" >> $GITHUB_ENV
+
+      - name: Cross-compile zlib (aarch64)
+        run: |
+          wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
+          tar xzf zlib-${ZLIB_VER}.tar.gz
+          cd zlib-${ZLIB_VER}
+          CC=aarch64-buildroot-linux-musl-gcc \
+            CFLAGS="-static" \
+            ./configure --prefix=${{ env.SYSROOT }} --static
+          make -j$(nproc)
+          make install
+
+      - name: Cross-compile openssl (aarch64)
+        run: |
+          wget -q https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+          tar xzf openssl-${OPENSSL_VER}.tar.gz
+          cd openssl-${OPENSSL_VER}
+          CC=aarch64-buildroot-linux-musl-gcc \
+            ./Configure linux-aarch64 no-shared no-tests \
+              --prefix=${{ env.SYSROOT }} \
+              --openssldir=${{ env.SYSROOT }}/etc/ssl
+          make -j$(nproc) build_libs
+          make install_dev
 
       - name: Download OpenSSH source
         run: |
@@ -47,8 +77,9 @@ jobs:
           ./configure \
             --host=${{ env.CROSS_PREFIX }} \
             CC="${{ env.CROSS_PREFIX }}-gcc" \
-            CFLAGS="-static" \
-            LDFLAGS="-static" \
+            CFLAGS="-static -I${{ env.SYSROOT }}/include" \
+            LDFLAGS="-static -L${{ env.SYSROOT }}/lib" \
+            --with-ssl-dir=${{ env.SYSROOT }} \
             --without-pam \
             --without-selinux \
             --without-audit \
@@ -83,6 +114,30 @@ jobs:
           TCDIR=$(ls -d $HOME/x86-i686--musl--stable-* | head -1)
           echo "${TCDIR}/bin" >> $GITHUB_PATH
           echo "CROSS_PREFIX=i686-buildroot-linux-musl" >> $GITHUB_ENV
+          echo "SYSROOT=$HOME/sysroot-i686" >> $GITHUB_ENV
+
+      - name: Cross-compile zlib (i686)
+        run: |
+          wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
+          tar xzf zlib-${ZLIB_VER}.tar.gz
+          cd zlib-${ZLIB_VER}
+          CC=i686-buildroot-linux-musl-gcc \
+            CFLAGS="-static -m32" \
+            ./configure --prefix=${{ env.SYSROOT }} --static
+          make -j$(nproc)
+          make install
+
+      - name: Cross-compile openssl (i686)
+        run: |
+          wget -q https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+          tar xzf openssl-${OPENSSL_VER}.tar.gz
+          cd openssl-${OPENSSL_VER}
+          CC=i686-buildroot-linux-musl-gcc \
+            ./Configure linux-x86 no-shared no-tests \
+              --prefix=${{ env.SYSROOT }} \
+              --openssldir=${{ env.SYSROOT }}/etc/ssl
+          make -j$(nproc) build_libs
+          make install_dev
 
       - name: Download OpenSSH source
         run: |
@@ -103,8 +158,9 @@ jobs:
           ./configure \
             --host=${{ env.CROSS_PREFIX }} \
             CC="${{ env.CROSS_PREFIX }}-gcc" \
-            CFLAGS="-static" \
-            LDFLAGS="-static" \
+            CFLAGS="-static -m32 -I${{ env.SYSROOT }}/include" \
+            LDFLAGS="-static -m32 -L${{ env.SYSROOT }}/lib" \
+            --with-ssl-dir=${{ env.SYSROOT }} \
             --without-pam \
             --without-selinux \
             --without-audit \
