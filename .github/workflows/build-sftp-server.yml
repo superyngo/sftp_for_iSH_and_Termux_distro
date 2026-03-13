@@ -8,23 +8,25 @@ on:
         required: true
         default: '9.9p2'
 
+# Toolchain source: toolchains.bootlin.com (stable, musl)
+# musl.cc is unreliable from GitHub Actions (wget exit code 4)
+env:
+  BOOTLIN_BASE: https://toolchains.bootlin.com/downloads/releases/toolchains
+  BOOTLIN_VER: 2024.05-1
+
 jobs:
   # ── arm64 static (for Termux proot-distro Debian) ──────────────────────────
   build-arm64:
     runs-on: ubuntu-24.04
     steps:
-      - name: Install arm64 cross toolchain
+      - name: Download bootlin aarch64-musl toolchain
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu \
-            wget make
-
-      - name: Download musl cross libc (arm64)
-        run: |
-          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar xf aarch64-linux-musl-cross.tgz -C $HOME
-          echo "$HOME/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          TARBALL="aarch64--musl--stable-${BOOTLIN_VER}.tar.xz"
+          wget -q "${BOOTLIN_BASE}/aarch64/tarballs/${TARBALL}"
+          tar xf "${TARBALL}" -C $HOME
+          TCDIR=$(ls -d $HOME/aarch64--musl--stable-* | head -1)
+          echo "${TCDIR}/bin" >> $GITHUB_PATH
+          echo "CROSS_PREFIX=aarch64-buildroot-linux-musl" >> $GITHUB_ENV
 
       - name: Download OpenSSH source
         run: |
@@ -39,12 +41,12 @@ jobs:
             ${{ env.SRCDIR }}/sftp-server.c
           grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
 
-      - name: Configure (arm64 static musl)
+      - name: Configure (aarch64 static musl)
         working-directory: ${{ env.SRCDIR }}
         run: |
           ./configure \
-            --host=aarch64-linux-musl \
-            CC=aarch64-linux-musl-gcc \
+            --host=${{ env.CROSS_PREFIX }} \
+            CC="${{ env.CROSS_PREFIX }}-gcc" \
             CFLAGS="-static" \
             LDFLAGS="-static" \
             --without-pam \
@@ -73,11 +75,14 @@ jobs:
   build-i386:
     runs-on: ubuntu-24.04
     steps:
-      - name: Download musl cross libc (i386)
+      - name: Download bootlin x86-i686-musl toolchain
         run: |
-          wget -q https://musl.cc/i686-linux-musl-cross.tgz
-          tar xf i686-linux-musl-cross.tgz -C $HOME
-          echo "$HOME/i686-linux-musl-cross/bin" >> $GITHUB_PATH
+          TARBALL="x86-i686--musl--stable-${BOOTLIN_VER}.tar.xz"
+          wget -q "${BOOTLIN_BASE}/x86-i686/tarballs/${TARBALL}"
+          tar xf "${TARBALL}" -C $HOME
+          TCDIR=$(ls -d $HOME/x86-i686--musl--stable-* | head -1)
+          echo "${TCDIR}/bin" >> $GITHUB_PATH
+          echo "CROSS_PREFIX=i686-buildroot-linux-musl" >> $GITHUB_ENV
 
       - name: Download OpenSSH source
         run: |
@@ -92,14 +97,14 @@ jobs:
             ${{ env.SRCDIR }}/sftp-server.c
           grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
 
-      - name: Configure (i386 static musl)
+      - name: Configure (i686 static musl)
         working-directory: ${{ env.SRCDIR }}
         run: |
           ./configure \
-            --host=i686-linux-musl \
-            CC=i686-linux-musl-gcc \
-            CFLAGS="-static -m32" \
-            LDFLAGS="-static -m32" \
+            --host=${{ env.CROSS_PREFIX }} \
+            CC="${{ env.CROSS_PREFIX }}-gcc" \
+            CFLAGS="-static" \
+            LDFLAGS="-static" \
             --without-pam \
             --without-selinux \
             --without-audit \
