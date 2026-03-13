@@ -2,86 +2,82 @@ name: Build patched sftp-server
 
 on:
   workflow_dispatch:
-    inputs:
-      openssh_version:
-        description: 'OpenSSH version (e.g. 9.9p2)'
-        required: true
-        default: '9.9p2'
 
-# Toolchain source: toolchains.bootlin.com (stable, musl)
-# musl.cc is unreliable from GitHub Actions (wget exit code 4)
+# Strategy (verified working on Ubuntu 24.04):
 #
-# bootlin toolchains are bare cross-compilers — they do NOT ship zlib or
-# openssl for the target. We cross-compile both from source into a local
-# sysroot and point openssh configure at it via CFLAGS/LDFLAGS.
-env:
-  BOOTLIN_BASE: https://toolchains.bootlin.com/downloads/releases/toolchains
-  BOOTLIN_VER: 2024.05-1
-  ZLIB_VER: 1.3.1
-  OPENSSL_VER: 3.5.0
+# 1. Enable deb-src and pull zlib + openssl + openssh source via `apt source`
+#    — no external downloads needed, no network blocks
+# 2. Cross-compile zlib with `make CC=<cross-gcc>` (NOT via ./configure env prefix)
+# 3. Cross-compile openssl with `CC=<cross-gcc> ./Configure`
+# 4. Run autoreconf on openssh apt source (required — configure.ac is newer than configure)
+# 5. Configure + make sftp-server with sysroot CFLAGS/LDFLAGS
+#
+# Produces:
+#   sftp-server-arm64-static  — for Termux proot-distro (Android aarch64)
+#   sftp-server-i386-static   — for iSH (iOS x86/i686)
 
 jobs:
-  # ── arm64 static (for Termux proot-distro Debian) ──────────────────────────
+  # ── arm64 static (Termux proot-distro Debian) ─────────────────────────────
   build-arm64:
     runs-on: ubuntu-24.04
     steps:
-      - name: Download bootlin aarch64-musl toolchain
+      - name: Enable deb-src and install cross toolchain
         run: |
-          TARBALL="aarch64--musl--stable-${BOOTLIN_VER}.tar.xz"
-          wget -q "${BOOTLIN_BASE}/aarch64/tarballs/${TARBALL}"
-          tar xf "${TARBALL}" -C $HOME
-          TCDIR=$(ls -d $HOME/aarch64--musl--stable-* | head -1)
-          echo "${TCDIR}/bin" >> $GITHUB_PATH
-          echo "CROSS_PREFIX=aarch64-buildroot-linux-musl" >> $GITHUB_ENV
-          echo "SYSROOT=$HOME/sysroot-aarch64" >> $GITHUB_ENV
+          echo "deb-src http://archive.ubuntu.com/ubuntu noble main" \
+            | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu autoconf make
+
+      - name: Fetch sources via apt
+        run: |
+          mkdir -p ~/src && cd ~/src
+          apt-get source zlib1g 2>&1 | tail -2
+          apt-get source openssl  2>&1 | tail -2
+          apt-get source openssh-server 2>&1 | tail -2
 
       - name: Cross-compile zlib (aarch64)
         run: |
-          wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
-          tar xzf zlib-${ZLIB_VER}.tar.gz
-          cd zlib-${ZLIB_VER}
-          ./configure --prefix=${{ env.SYSROOT }} --static
+          SYSROOT=~/sysroot-aarch64
+          mkdir -p $SYSROOT
+          ZLIBDIR=$(ls -d ~/src/zlib-* | head -1)
+          cd $ZLIBDIR
+          ./configure --prefix=$SYSROOT --static
           make -j$(nproc) \
-            CC=aarch64-buildroot-linux-musl-gcc \
-            AR=aarch64-buildroot-linux-musl-ar \
-            RANLIB=aarch64-buildroot-linux-musl-ranlib \
+            CC=aarch64-linux-gnu-gcc \
+            AR=aarch64-linux-gnu-ar \
+            RANLIB=aarch64-linux-gnu-ranlib \
             CFLAGS="-static"
           make install
 
       - name: Cross-compile openssl (aarch64)
         run: |
-          wget -q https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-          tar xzf openssl-${OPENSSL_VER}.tar.gz
-          cd openssl-${OPENSSL_VER}
-          CC=aarch64-buildroot-linux-musl-gcc \
+          SYSROOT=~/sysroot-aarch64
+          SSLDIR=$(ls -d ~/src/openssl-* | head -1)
+          cd $SSLDIR
+          CC=aarch64-linux-gnu-gcc \
             ./Configure linux-aarch64 no-shared no-tests \
-              --prefix=${{ env.SYSROOT }} \
-              --openssldir=${{ env.SYSROOT }}/etc/ssl
+              --prefix=$SYSROOT \
+              --openssldir=$SYSROOT/etc/ssl
           make -j$(nproc) build_libs
           make install_dev
 
-      - name: Download OpenSSH source
+      - name: Patch + build sftp-server (aarch64)
         run: |
-          VERSION=${{ github.event.inputs.openssh_version }}
-          wget -q https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${VERSION}.tar.gz
-          tar xzf openssh-${VERSION}.tar.gz
-          echo "SRCDIR=openssh-${VERSION}" >> $GITHUB_ENV
+          SYSROOT=~/sysroot-aarch64
+          SSHDIR=$(ls -d ~/src/openssh-* | head -1)
+          cd $SSHDIR
 
-      - name: Patch platform_disable_tracing
-        run: |
-          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' \
-            ${{ env.SRCDIR }}/sftp-server.c
-          grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
+          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' sftp-server.c
+          grep -n 'platform_disable_tracing' sftp-server.c
 
-      - name: Configure (aarch64 static musl)
-        working-directory: ${{ env.SRCDIR }}
-        run: |
+          autoreconf 2>/dev/null || true
+
           ./configure \
-            --host=${{ env.CROSS_PREFIX }} \
-            CC="${{ env.CROSS_PREFIX }}-gcc" \
-            CFLAGS="-static -I${{ env.SYSROOT }}/include" \
-            LDFLAGS="-static -L${{ env.SYSROOT }}/lib" \
-            --with-ssl-dir=${{ env.SYSROOT }} \
+            --host=aarch64-linux-gnu \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-static -I${SYSROOT}/include" \
+            LDFLAGS="-static -L${SYSROOT}/lib" \
+            --with-ssl-dir=${SYSROOT} \
             --without-pam \
             --without-selinux \
             --without-audit \
@@ -89,82 +85,81 @@ jobs:
             --prefix=/usr \
             --sysconfdir=/etc/ssh
 
-      - name: Build sftp-server
-        working-directory: ${{ env.SRCDIR }}
-        run: make sftp-server
+          make sftp-server
 
       - name: Verify binary
         run: |
-          file ${{ env.SRCDIR }}/sftp-server
-          ls -lh ${{ env.SRCDIR }}/sftp-server
+          SSHDIR=$(ls -d ~/src/openssh-* | head -1)
+          file $SSHDIR/sftp-server
+          ls -lh $SSHDIR/sftp-server
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sftp-server-arm64-static
-          path: ${{ env.SRCDIR }}/sftp-server
+          path: ~/src/openssh-*/sftp-server
 
-  # ── i386 static (for iSH Alpine) ───────────────────────────────────────────
+  # ── i386 static (iSH Alpine x86) ──────────────────────────────────────────
   build-i386:
     runs-on: ubuntu-24.04
     steps:
-      - name: Download bootlin x86-i686-musl toolchain
+      - name: Enable deb-src and install cross toolchain
         run: |
-          TARBALL="x86-i686--musl--stable-${BOOTLIN_VER}.tar.xz"
-          wget -q "${BOOTLIN_BASE}/x86-i686/tarballs/${TARBALL}"
-          tar xf "${TARBALL}" -C $HOME
-          TCDIR=$(ls -d $HOME/x86-i686--musl--stable-* | head -1)
-          echo "${TCDIR}/bin" >> $GITHUB_PATH
-          echo "CROSS_PREFIX=i686-buildroot-linux-musl" >> $GITHUB_ENV
-          echo "SYSROOT=$HOME/sysroot-i686" >> $GITHUB_ENV
+          echo "deb-src http://archive.ubuntu.com/ubuntu noble main" \
+            | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-i686-linux-gnu autoconf make
+
+      - name: Fetch sources via apt
+        run: |
+          mkdir -p ~/src && cd ~/src
+          apt-get source zlib1g 2>&1 | tail -2
+          apt-get source openssl  2>&1 | tail -2
+          apt-get source openssh-server 2>&1 | tail -2
 
       - name: Cross-compile zlib (i686)
         run: |
-          wget -q https://zlib.net/zlib-${ZLIB_VER}.tar.gz
-          tar xzf zlib-${ZLIB_VER}.tar.gz
-          cd zlib-${ZLIB_VER}
-          ./configure --prefix=${{ env.SYSROOT }} --static
+          SYSROOT=~/sysroot-i686
+          mkdir -p $SYSROOT
+          ZLIBDIR=$(ls -d ~/src/zlib-* | head -1)
+          cd $ZLIBDIR
+          ./configure --prefix=$SYSROOT --static
           make -j$(nproc) \
-            CC=i686-buildroot-linux-musl-gcc \
-            AR=i686-buildroot-linux-musl-ar \
-            RANLIB=i686-buildroot-linux-musl-ranlib \
+            CC=i686-linux-gnu-gcc \
+            AR=i686-linux-gnu-ar \
+            RANLIB=i686-linux-gnu-ranlib \
             CFLAGS="-static -m32"
           make install
 
       - name: Cross-compile openssl (i686)
         run: |
-          wget -q https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-          tar xzf openssl-${OPENSSL_VER}.tar.gz
-          cd openssl-${OPENSSL_VER}
-          CC=i686-buildroot-linux-musl-gcc \
+          SYSROOT=~/sysroot-i686
+          SSLDIR=$(ls -d ~/src/openssl-* | head -1)
+          cd $SSLDIR
+          CC=i686-linux-gnu-gcc \
             ./Configure linux-x86 no-shared no-tests \
-              --prefix=${{ env.SYSROOT }} \
-              --openssldir=${{ env.SYSROOT }}/etc/ssl
+              --prefix=$SYSROOT \
+              --openssldir=$SYSROOT/etc/ssl
           make -j$(nproc) build_libs
           make install_dev
 
-      - name: Download OpenSSH source
+      - name: Patch + build sftp-server (i686)
         run: |
-          VERSION=${{ github.event.inputs.openssh_version }}
-          wget -q https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${VERSION}.tar.gz
-          tar xzf openssh-${VERSION}.tar.gz
-          echo "SRCDIR=openssh-${VERSION}" >> $GITHUB_ENV
+          SYSROOT=~/sysroot-i686
+          SSHDIR=$(ls -d ~/src/openssh-* | head -1)
+          cd $SSHDIR
 
-      - name: Patch platform_disable_tracing
-        run: |
-          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' \
-            ${{ env.SRCDIR }}/sftp-server.c
-          grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
+          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' sftp-server.c
+          grep -n 'platform_disable_tracing' sftp-server.c
 
-      - name: Configure (i686 static musl)
-        working-directory: ${{ env.SRCDIR }}
-        run: |
+          autoreconf 2>/dev/null || true
+
           ./configure \
-            --host=${{ env.CROSS_PREFIX }} \
-            CC="${{ env.CROSS_PREFIX }}-gcc" \
-            CFLAGS="-static -m32 -I${{ env.SYSROOT }}/include" \
-            LDFLAGS="-static -m32 -L${{ env.SYSROOT }}/lib" \
-            --with-ssl-dir=${{ env.SYSROOT }} \
+            --host=i686-linux-gnu \
+            CC=i686-linux-gnu-gcc \
+            CFLAGS="-static -m32 -I${SYSROOT}/include" \
+            LDFLAGS="-static -m32 -L${SYSROOT}/lib" \
+            --with-ssl-dir=${SYSROOT} \
             --without-pam \
             --without-selinux \
             --without-audit \
@@ -172,17 +167,16 @@ jobs:
             --prefix=/usr \
             --sysconfdir=/etc/ssh
 
-      - name: Build sftp-server
-        working-directory: ${{ env.SRCDIR }}
-        run: make sftp-server
+          make sftp-server
 
       - name: Verify binary
         run: |
-          file ${{ env.SRCDIR }}/sftp-server
-          ls -lh ${{ env.SRCDIR }}/sftp-server
+          SSHDIR=$(ls -d ~/src/openssh-* | head -1)
+          file $SSHDIR/sftp-server
+          ls -lh $SSHDIR/sftp-server
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sftp-server-i386-static
-          path: ${{ env.SRCDIR }}/sftp-server
+          path: ~/src/openssh-*/sftp-server
