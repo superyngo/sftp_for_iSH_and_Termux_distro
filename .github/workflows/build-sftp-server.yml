@@ -1,0 +1,123 @@
+name: Build patched sftp-server
+
+on:
+  workflow_dispatch:
+    inputs:
+      openssh_version:
+        description: 'OpenSSH version (e.g. 9.9p2)'
+        required: true
+        default: '9.9p2'
+
+jobs:
+  # ── arm64 static (for Termux proot-distro Debian) ──────────────────────────
+  build-arm64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install arm64 cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            wget make
+
+      - name: Download musl cross libc (arm64)
+        run: |
+          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar xf aarch64-linux-musl-cross.tgz -C $HOME
+          echo "$HOME/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      - name: Download OpenSSH source
+        run: |
+          VERSION=${{ github.event.inputs.openssh_version }}
+          wget -q https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${VERSION}.tar.gz
+          tar xzf openssh-${VERSION}.tar.gz
+          echo "SRCDIR=openssh-${VERSION}" >> $GITHUB_ENV
+
+      - name: Patch platform_disable_tracing
+        run: |
+          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' \
+            ${{ env.SRCDIR }}/sftp-server.c
+          grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
+
+      - name: Configure (arm64 static musl)
+        working-directory: ${{ env.SRCDIR }}
+        run: |
+          ./configure \
+            --host=aarch64-linux-musl \
+            CC=aarch64-linux-musl-gcc \
+            CFLAGS="-static" \
+            LDFLAGS="-static" \
+            --without-pam \
+            --without-selinux \
+            --without-audit \
+            --without-shadow \
+            --prefix=/usr \
+            --sysconfdir=/etc/ssh
+
+      - name: Build sftp-server
+        working-directory: ${{ env.SRCDIR }}
+        run: make sftp-server
+
+      - name: Verify binary
+        run: |
+          file ${{ env.SRCDIR }}/sftp-server
+          ls -lh ${{ env.SRCDIR }}/sftp-server
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sftp-server-arm64-static
+          path: ${{ env.SRCDIR }}/sftp-server
+
+  # ── i386 static (for iSH Alpine) ───────────────────────────────────────────
+  build-i386:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download musl cross libc (i386)
+        run: |
+          wget -q https://musl.cc/i686-linux-musl-cross.tgz
+          tar xf i686-linux-musl-cross.tgz -C $HOME
+          echo "$HOME/i686-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      - name: Download OpenSSH source
+        run: |
+          VERSION=${{ github.event.inputs.openssh_version }}
+          wget -q https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${VERSION}.tar.gz
+          tar xzf openssh-${VERSION}.tar.gz
+          echo "SRCDIR=openssh-${VERSION}" >> $GITHUB_ENV
+
+      - name: Patch platform_disable_tracing
+        run: |
+          sed -i 's/platform_disable_tracing(1)/platform_disable_tracing(0)/' \
+            ${{ env.SRCDIR }}/sftp-server.c
+          grep -n 'platform_disable_tracing' ${{ env.SRCDIR }}/sftp-server.c
+
+      - name: Configure (i386 static musl)
+        working-directory: ${{ env.SRCDIR }}
+        run: |
+          ./configure \
+            --host=i686-linux-musl \
+            CC=i686-linux-musl-gcc \
+            CFLAGS="-static -m32" \
+            LDFLAGS="-static -m32" \
+            --without-pam \
+            --without-selinux \
+            --without-audit \
+            --without-shadow \
+            --prefix=/usr \
+            --sysconfdir=/etc/ssh
+
+      - name: Build sftp-server
+        working-directory: ${{ env.SRCDIR }}
+        run: make sftp-server
+
+      - name: Verify binary
+        run: |
+          file ${{ env.SRCDIR }}/sftp-server
+          ls -lh ${{ env.SRCDIR }}/sftp-server
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sftp-server-i386-static
+          path: ${{ env.SRCDIR }}/sftp-server
